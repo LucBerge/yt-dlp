@@ -113,9 +113,26 @@ class DeezerFD(FileDownloader):
             }, info_dict)
 
         stream, realfilename = sanitize_open(filename, "wb")
+        success = False
         try:
-            decryptfile(data, info_dict['key'], stream, progressupdate)
+            if 'key' in info_dict:
+                decryptfile(data, info_dict['key'], stream, progressupdate)
+            # If there is no key it's just a preview without encryption
+            else:
+                i = 0
+                byte_counter = 0
+                while True:
+                    buf = data.read(2048)
+                    if not buf:
+                        break
+                    stream.write(buf)
+                    i += 1
+                    byte_counter += len(buf)
+                    if (i % 16) == 0:
+                        progressupdate(byte_counter)
             progressfinished()
+            success = True
         finally:
             if realfilename != '-':
                 stream.close()
+            return success

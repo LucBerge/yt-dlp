@@ -89,71 +89,90 @@ class DeezerMusicExtractor(DeezerBaseInfoExtractor):
             "cid=550330597"
 
         response = self._download_json(url, data_id, data=json.dumps(json_data).encode('utf-8'))
+        self.get_key_dynamically()
 
+        formatref = {
+            'FLAC': {'ext':'flac','preference':10},
+            'MP3_320': {'ext':'mp3','preference':2},
+            'MP3_256': {'ext':'mp3','preference':1},
+            'MP3_128': {'ext':'mp3','preference':-1},
+            'MP3_64': {'ext':'mp3','preference':-2},
+            'AAC_64': {'ext':'aac','preference':-3},
+        }
+        
         entries = []
+        format_index = {}
+        entries_format = {}
         for track in traverse_obj(response, ('results', 'data')):
 
+            formatinfo = []
+            for format_id in formatref:
+
+                format_filesize = track.get('FILESIZE_' + format_id)
+                if format_filesize and format_filesize != "0":
+
+                    if format_id not in entries_format:
+                        entries_format[format_id] = []
+                    # If there is a fallback TRACK_TOKEN, it will be the one to use, else fetch standard TRACK_TOKEN
+                    entries_format[format_id].append(traverse_obj(track, ('FALLBACK', 'TRACK_TOKEN'), 'TRACK_TOKEN', default=''))
+
+                    if format_id not in format_index:
+                        format_index[format_id] = 0
+                    formatinfo.append({
+                        'format_id': format_id,
+                        'url' : track.get('MEDIA', [{}])[0].get('HREF'),
+                        'preference': formatref[format_id]['preference'],
+                        'ext': formatref[format_id]['ext'],
+                        'protocol': 'deezer',
+                        'index': format_index[format_id],
+                     })
+                     format_index[format_id] += 1
             entries.append({
-                'id': track.get('SNG_ID'),
+                'id': traverse_obj(track, ('FALLBACK', 'SNG_ID'), 'SNG_ID', default=None),
                 'duration': str_to_int(track.get('DURATION')),
                 'title': track.get('SNG_TITLE'),
                 'uploader': track.get('ART_NAME'),
                 'artist': track.get('ART_NAME'),
-                'uploader_id': track.get('ART_ID'),
+                'uploader_id': traverse_obj(track, ('FALLBACK', 'ART_ID'), 'ART_ID', default=None),
                 'track_number': str_to_int(track.get('TRACK_NUMBER')),
                 'release_date': str_to_int(track.get('DIGITAL_RELEASE_DATE', '').replace(' ', '')),
                 'album': track.get('ALB_TITLE'),
-                'formats': [{
-                    'format_id': 'MP3_PREVIEW',
-                    'url': track.get('MEDIA', [{}])[0].get('HREF'),
-                    'preference': -3,
-                    'ext': 'mp3',
-                    'track_token': track.get('TRACK_TOKEN'),
-                }]
+                'formats': formatinfo
             })
 
         ###############
         # GET FORMATS #
         ###############
+        format_responses = {}
+        for format_id in formatref:
+            if format_id in entries_format:
+                data = {
+                    "license_token": license_token,
+                    "media": [{
+                        "formats": [
+                            {"cipher": "BF_CBC_STRIPE", "format": format_id}
+                        ],
+                        "type": "FULL"}
+                    ],
+                    "track_tokens": entries_format[format_id]
+                }
+                format_responses[format_id] = self._download_json(self.GET_URL, data_id, data=json.dumps(data).encode('utf-8'))
 
-        track_tokens = [entry.get('formats', [{}])[0].get('track_token') for entry in entries]
-
-        data = {
-            "license_token": license_token,
-            "media": [{
-                "formats": [
-                    {"cipher": "BF_CBC_STRIPE", "format": "MP3_128"},
-                    {"cipher": "BF_CBC_STRIPE", "format": "MP3_64"}
-                ],
-                "type": "FULL"}
-            ],
-            "track_tokens": track_tokens
-        }
-
-        self.get_key_dynamically()
-        response = self._download_json(self.GET_URL, data_id, data=json.dumps(data).encode('utf-8'))
-
-        for i in range(len(entries)):
-            media = response.get('data', [{}])[i].get('media', [{}])[0]
-            formats = entries[i].get('formats', [{}])
-            format_id = media.get('format')
-
-            for source in media.get('sources', {}):
-
-                format_preference = -1 if '128' in format_id else -2
-                format_url = source.get('url')
-                format_key = self.compute_blowfish_key(entries[i].get('id'))
-
-                formats.append({
-                    'format_id': format_id,
-                    'url': format_url,
-                    'preference': format_preference,
-                    'ext': 'mp3',
-                    'key': format_key,
-                    'protocol': 'deezer',
-                })
-
-            self._sort_formats(formats)
+        for entry in entries:
+            fetched_formats = []
+            for fentry in entry['formats']:
+                fresponse = format_responses[fentry['format_id']]
+                data_obj = fresponse['data'][fentry['index']]
+                # If media is not allowed with our token not transformed we still get the preview in mp3_128
+                if 'media' not in data_obj or not data_obj['media']:
+                    if fentry['format_id'] == 'MP3_128':
+                        fetched_formats.append(fentry)
+                else:
+                    media_obj = data_obj['media'][0]
+                    fentry['url'] = next(source['url'] for source in media_obj['sources'] if source['provider'] == 'ak')
+                    fentry['key'] = self.compute_blowfish_key(entry['id'])
+                    fetched_formats.append(fentry)
+            entry['formats'] = fetched_formats
 
         return entries
 
